@@ -36,17 +36,32 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # First, so that a missing or wrong game.wasm fails in seconds. No
-      # cache anywhere: the game's code and what is built from it stay in
-      # the draft.
+      # Fork variant: the web upload limit is 25 MB, so game.wasm (63 MB)
+      # lives in the draft as Glue5-game.wasm.part1..3 (the Glue5- prefix
+      # keeps them covered by the release guard) and is reassembled here;
+      # its sha256 must match the supported build.
       - name: game.wasm from the draft release
         id: game
         run: |
           game=$RUNNER_TEMP/game
           # Windows: D:/a/_temp/game, a path for Git's bash and for cargo alike.
           if [ "$RUNNER_OS" = Windows ]; then game=$(cygpath -m "$game"); fi
-          .github/scripts/draft.sh fetch "$game"
+          .github/scripts/draft.sh guard || exit 1
+          release=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" | jq -c '[.[][] | select(.draft) | select(.assets != null and any(.assets[]; .name | startswith("Glue5-game.wasm.part")))] | sort_by(.created_at) | last // empty')
+          [ -n "$release" ] || { echo "::error::No draft release with Glue5-game.wasm.part1..3"; exit 1; }
+          id=$(jq -r .id <<<"$release")
+          mkdir -p "$game/b/8b0b5899ed"
+          for part in 1 2 3; do
+            asset=$(jq -r --arg n "Glue5-game.wasm.part$part" '[.assets[] | select(.name == $n) | .id] | if length == 1 then .[0] else empty end' <<<"$release")
+            [ -n "$asset" ] || { echo "::error::The draft has no single asset Glue5-game.wasm.part$part"; exit 1; }
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/assets/$asset" >> "$game/b/8b0b5899ed/game.wasm"
+          done
+          sum=$(sha256sum "$game/b/8b0b5899ed/game.wasm" 2>/dev/null || shasum -a 256 "$game/b/8b0b5899ed/game.wasm"); sum=${sum%% *}
+          [ "$sum" = "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0" ] || { echo "::error::reassembled game.wasm sha256 $sum does not match the supported build"; exit 1; }
+          echo "game.wasm reassembled from 3 parts: build 8b0b5899ed"
           echo "GLUE5_GAME_DIR=$game" >>"$GITHUB_ENV"
+          echo "release=$id" >>"$GITHUB_OUTPUT"
 
       # Windows: the tasks run in Git's bash (see the README's Windows
       # section); Visual Studio and LLVM's clang-cl come with the machine.
